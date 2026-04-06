@@ -46,14 +46,14 @@ Model loading and inference used by both scripts. Key functions:
 - `generate(model, prj, tokenizer, bot_id, eot_id, prompt, num_latent=6)` — run inference (set `num_latent=0` to skip reasoning)
 - `extract_number(text)` — pull the last number from model output
 
-## Results (100 examples)
+## Results (full GSM8K test set, 1319 questions)
 
-| Mode | Accuracy | Throughput |
-|------|----------|------------|
-| Reasoning (6 latent steps) | **39.0%** | 7.2 q/s |
-| No reasoning (0 steps) | 36.0% | 9.4 q/s |
+| Mode | Accuracy | Throughput | Time |
+|------|----------|------------|------|
+| Reasoning (6 latent steps) | **36.7%** | 7.0 q/s | 188s |
+| No reasoning (0 steps) | 28.7% | 7.7 q/s | 171s |
 
-Reasoning advantage: **+3.0%** (helped 6 questions, hurt 3). Full 1319-question benchmark pending.
+Reasoning advantage: **+8.0%** (helped 134 questions, hurt 29).
 
 ## How CoDi inference works
 
