@@ -112,29 +112,83 @@ def load_model():
 
 # ── Visualization ─────────────────────────────────────────────────────────────
 
-def top_token_projections(latent_embd, embed_weight, tokenizer, k=8):
-    latent = latent_embd.squeeze().float()
-    vocab_w = embed_weight[: embed_weight.shape[0] - 3].float()
-    sims = F.cosine_similarity(latent.unsqueeze(0), vocab_w, dim=1)
-    topk = torch.topk(sims, k)
-    tokens = []
-    for idx, score in zip(topk.indices.tolist(), topk.values.tolist()):
-        tok = tokenizer.decode([idx]).strip()
-        if tok:
-            tokens.append((tok, score))
-    return tokens
+def latent_heatmap(latent_embd, width=72):
+    """Render the latent vector as a 2-row colored heatmap using half-block chars.
+
+    Downsamples the 2048-dim vector to width*2 bins, arranges as 2 rows,
+    and uses '▀' with fg=top_row color, bg=bottom_row color to draw
+    two pixel rows per text line. Diverging blue-white-red colormap.
+    """
+    flat = latent_embd.squeeze().float()
+    n = flat.shape[0]
+    # Downsample to width*2 values via averaging
+    bins = width * 2
+    chunk = n // bins
+    vals = flat[:chunk * bins].view(bins, chunk).mean(dim=1)
+
+    # Normalize to [-1, 1] range using percentile-ish clamping
+    vmax = vals.abs().quantile(0.95).item() + 1e-8
+    vals = (vals / vmax).clamp(-1, 1).tolist()
+
+    top_row = vals[:width]
+    bot_row = vals[width:]
+
+    def val_to_rgb(v):
+        """Diverging colormap: blue (neg) → light gray (zero) → red (pos), light-mode friendly."""
+        if v >= 0:
+            t = v
+            r = int(180 + 75 * t)       # 180 → 255
+            g = int(180 - 140 * t)       # 180 → 40
+            b = int(180 - 150 * t)       # 180 → 30
+        else:
+            t = -v
+            r = int(180 - 160 * t)       # 180 → 20
+            g = int(180 - 110 * t)       # 180 → 70
+            b = int(180 + 55 * t)        # 180 → 235
+        return (max(0, min(255, r)), max(0, min(255, g)), max(0, min(255, b)))
+
+    parts = []
+    for t, b_val in zip(top_row, bot_row):
+        tr, tg, tb = val_to_rgb(t)
+        br, bg, bb = val_to_rgb(b_val)
+        parts.append(f"[rgb({tr},{tg},{tb}) on rgb({br},{bg},{bb})]▀[/]")
+    return "".join(parts)
 
 
-def norm_bar(value, max_val, width=15):
-    """Small inline bar chart."""
-    frac = min(1.0, max(0.0, value / max_val))
-    filled = int(frac * width)
-    return "▓" * filled + "░" * (width - filled)
+def diff_heatmap(curr, prev, width=72):
+    """Render the change between two latent vectors as a heatmap."""
+    diff = (curr.squeeze().float() - prev.squeeze().float())
+    n = diff.shape[0]
+    bins = width
+    chunk = n // bins
+    vals = diff[:chunk * bins].view(bins, chunk).mean(dim=1)
+    vmax = vals.abs().quantile(0.95).item() + 1e-8
+    vals = (vals / vmax).clamp(-1, 1).tolist()
+
+    def val_to_rgb(v):
+        if v >= 0:
+            t = v
+            r = int(220 - 30 * t)
+            g = int(220 - 180 * t)
+            b = int(220 - 190 * t)
+        else:
+            t = -v
+            r = int(220 - 200 * t)
+            g = int(220 - 150 * t)
+            b = int(220 - 10 * t)
+        return (max(0, min(255, r)), max(0, min(255, g)), max(0, min(255, b)))
+
+    parts = []
+    for v in vals:
+        cr, cg, cb = val_to_rgb(v)
+        parts.append(f"[on rgb({cr},{cg},{cb})] [/]")
+    return "".join(parts)
 
 
 def make_latent_panel(step, latent_embd, prev_embd, embed_weight, tokenizer, elapsed):
-    projections = top_token_projections(latent_embd, embed_weight, tokenizer)
     norm = latent_embd.squeeze().float().norm().item()
+    flat = latent_embd.squeeze().float()
+    sparsity = (flat.abs() < 0.01).float().mean().item()
 
     # Drift from previous latent
     drift_line = ""
@@ -142,38 +196,23 @@ def make_latent_panel(step, latent_embd, prev_embd, embed_weight, tokenizer, ela
         sim = F.cosine_similarity(
             latent_embd.flatten().float(), prev_embd.flatten().float(), dim=0
         ).item()
-        bar = norm_bar(sim, 1.0, 20)
-        drift_line = f"  cos(prev): [rgb(30,100,160)]{bar}[/] [bold]{sim:.4f}[/]"
-
-    # Vocab projection tokens with gradient coloring (dark on light bg)
-    proj_parts = []
-    if projections:
-        max_s = projections[0][1]
-        min_s = projections[-1][1] if len(projections) > 1 else max_s
-        for tok, score in projections:
-            t = (score - min_s) / (max_s - min_s + 1e-8)
-            # Dark purple → dark blue gradient, readable on white
-            r = int(100 - 60 * t)
-            g = int(40 + 20 * t)
-            b = int(140 + 40 * t)
-            color = f"rgb({r},{g},{b})"
-            proj_parts.append(f"[bold {color}]\"{tok}\"[/]={score:.3f}")
-
-    # Activation stats
-    flat = latent_embd.squeeze().float()
-    sparsity = (flat.abs() < 0.01).float().mean().item()
+        drift_line = f"  cos(prev)=[bold]{sim:.4f}[/]"
 
     stats_line = (
         f"  ‖h‖=[bold rgb(180,120,0)]{norm:.1f}[/]  "
         f"sparsity=[bold rgb(180,120,0)]{sparsity:.1%}[/]  "
         f"latency=[bold rgb(0,120,60)]{elapsed*1000:.0f}ms[/]"
     )
-    body = stats_line + "\n"
     if drift_line:
-        body += drift_line + "\n"
-    body += f"  vocab projection: {' '.join(proj_parts)}"
+        stats_line += drift_line
 
-    # Saturated dark colors that pop on white/light backgrounds
+    heatmap = latent_heatmap(latent_embd, width=72)
+    body = f"{stats_line}\n  {heatmap}"
+
+    if prev_embd is not None:
+        dhm = diff_heatmap(latent_embd, prev_embd, width=72)
+        body += f"\n  {dhm}  [rgb(100,100,100)]delta[/]"
+
     palette = [
         "rgb(150,30,150)",   # purple
         "rgb(0,80,180)",     # blue
