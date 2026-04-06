@@ -10,9 +10,7 @@ import argparse
 import sys
 import time
 import torch
-import torch.nn as nn
 import torch.nn.functional as F
-from transformers import LlamaForCausalLM, LlamaConfig, AutoTokenizer
 from rich.console import Console
 from rich.panel import Panel
 from rich.text import Text
@@ -21,93 +19,9 @@ from rich.align import Align
 from rich.console import Group
 from rich import box
 
+from codi_model import load_model, NUM_LATENT, device
+
 console = Console()
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-CKPT_DIR = "/root/.cache/huggingface/hub/models--bcywinski--codi_llama1b-answer_only/snapshots/315ec5cb5f9a071f950edb8455ca5c9a5f59691e"
-NUM_LATENT = 6          # matches training config
-LORA_ALPHA = 32         # from train script
-LORA_R = 128
-
-
-def load_model():
-    """Reconstruct LlamaForCausalLM from checkpoint, merging LoRA into base weights."""
-    console.print("[dark_cyan]Loading checkpoint...[/]")
-    state_dict = torch.load(f"{CKPT_DIR}/pytorch_model.bin", map_location="cpu", weights_only=False)
-
-    embed_w = state_dict["codi.base_model.model.model.embed_tokens.weight"]
-    vocab_size, hidden_size = embed_w.shape
-
-    num_layers = 0
-    while f"codi.base_model.model.model.layers.{num_layers}.input_layernorm.weight" in state_dict:
-        num_layers += 1
-
-    inter_size = state_dict["codi.base_model.model.model.layers.0.mlp.gate_proj.base_layer.weight"].shape[0]
-
-    config = LlamaConfig(
-        vocab_size=vocab_size,
-        hidden_size=hidden_size,
-        intermediate_size=inter_size,
-        num_hidden_layers=num_layers,
-        num_attention_heads=32,
-        num_key_value_heads=8,
-        max_position_embeddings=131072,
-        rope_theta=500000.0,
-        rms_norm_eps=1e-5,
-        tie_word_embeddings=True,
-    )
-
-    console.print(f"[dark_cyan]Building LlamaForCausalLM: {num_layers}L, {hidden_size}d, vocab={vocab_size}[/]")
-    model = LlamaForCausalLM(config).to(torch.bfloat16)
-
-    # Map checkpoint keys → plain model keys, merging LoRA
-    prefix = "codi.base_model.model."
-    new_sd = {}
-    for key in state_dict:
-        if key.startswith("prj.") or not key.startswith(prefix):
-            continue
-        if "lora_A" in key or "lora_B" in key:
-            continue
-        plain_key = key[len(prefix):].replace(".base_layer.", ".")
-        new_sd[plain_key] = state_dict[key]
-
-    scale = LORA_ALPHA / LORA_R
-    for a_key in [k for k in state_dict if "lora_A.default.weight" in k]:
-        b_key = a_key.replace("lora_A.default.weight", "lora_B.default.weight")
-        plain_key = a_key[len(prefix):].replace(".lora_A.default.weight", ".base_layer.weight").replace(".base_layer.", ".")
-        A = state_dict[a_key].float()
-        B = state_dict[b_key].float()
-        if plain_key in new_sd:
-            new_sd[plain_key] = (new_sd[plain_key].float() + (B @ A) * scale).to(torch.bfloat16)
-
-    missing, _ = model.load_state_dict(new_sd, strict=False)
-    console.print(f"[dark_green]Loaded model ({len(new_sd)} tensors, {len(missing)} missing)[/]")
-
-    # Projection layer
-    prj = nn.Sequential(
-        nn.Dropout(0.0),
-        nn.Linear(hidden_size, hidden_size),
-        nn.GELU(),
-        nn.Linear(hidden_size, hidden_size),
-    )
-    prj.add_module("ln", nn.LayerNorm(hidden_size))
-    prj_sd = {k[4:]: state_dict[k] for k in state_dict if k.startswith("prj.")}
-    prj.load_state_dict(prj_sd)
-    prj = prj.to(torch.bfloat16).to(device)
-
-    model = model.to(device)
-    model.eval()
-    prj.eval()
-
-    tokenizer = AutoTokenizer.from_pretrained(CKPT_DIR, use_fast=True)
-    if tokenizer.pad_token_id is None:
-        tokenizer.pad_token = "[PAD]"
-
-    ori_vocab = vocab_size - 3
-    bot_id = ori_vocab + 1
-    eot_id = ori_vocab + 2
-
-    return model, prj, tokenizer, bot_id, eot_id
 
 
 # ── Visualization ─────────────────────────────────────────────────────────────
