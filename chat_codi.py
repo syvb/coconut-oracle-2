@@ -372,6 +372,23 @@ def main():
                     box=box.ROUNDED,
                     width=80,
                 ))
+
+                # Interactive oracle Q&A loop
+                while True:
+                    console.print("[rgb(150,30,150)]Ask the oracle anything about the reasoning (empty to continue):[/]")
+                    oracle_q = console.input("[bold rgb(150,30,150)]Oracle Q:[/] ").strip()
+                    if not oracle_q:
+                        break
+                    with console.status("[bold rgb(150,30,150)]Oracle thinking...", spinner="dots"):
+                        oi = make_oracle_input(user_input, steps_data, trace.output, oracle_q)
+                        ans = oracle_answer(oracle_model, oracle_tok, oi)
+                    console.print(Panel(
+                        ans,
+                        title=f"[bold rgb(150,30,150)]🔮 {oracle_q}[/]",
+                        border_style="rgb(150,30,150)",
+                        box=box.ROUNDED,
+                        width=80,
+                    ))
         except KeyboardInterrupt:
             console.print("\nGoodbye!")
             break
