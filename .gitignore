@@ -1,3 +1,10 @@
 __pycache__/
 *.pyc
 .ipynb_checkpoints/
+
+# Large data artifacts (regenerable via pipeline)
+traces_test.jsonl
+oracle_train.jsonl
+oracle_val.jsonl
+*.cache.pt
+oracle_model/

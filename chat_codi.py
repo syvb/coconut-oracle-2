@@ -19,7 +19,7 @@ from rich.align import Align
 from rich.console import Group
 from rich import box
 
-from codi_model import load_model, NUM_LATENT, device
+from codi_model import load_model, generate_with_traces, NUM_LATENT, device
 
 console = Console()
 
@@ -291,6 +291,12 @@ def main():
     parser = argparse.ArgumentParser(description="Interactive CoDi chat")
     parser.add_argument("--no-reasoning", action="store_true",
                         help="Skip latent reasoning steps (decode directly after encoding)")
+    parser.add_argument("--oracle", action="store_true",
+                        help="Run Latent Oracle to explain reasoning after each response")
+    parser.add_argument("--oracle-dir", default="oracle_model/best",
+                        help="Path to oracle adapter weights")
+    parser.add_argument("--oracle-base", default=None,
+                        help="Base model for oracle")
     args = parser.parse_args()
 
     console.print(Panel(
@@ -306,6 +312,15 @@ def main():
     with console.status("[bold rgb(0,80,180)]Loading model...", spinner="dots"):
         model, prj, tokenizer, bot_id, eot_id = load_model()
 
+    oracle_model = None
+    oracle_tok = None
+    if args.oracle:
+        with console.status("[bold rgb(150,30,150)]Loading oracle...", spinner="dots"):
+            from oracle_inference import load_oracle, oracle_answer
+            from generate_oracle_data import make_oracle_input
+            oracle_model, oracle_tok = load_oracle(args.oracle_dir, args.oracle_base)
+        console.print("[bold rgb(150,30,150)]Oracle loaded.[/]")
+
     console.print("[bold rgb(0,130,50)]Ready![/] Type a math question. (quit to exit)\n")
 
     while True:
@@ -319,6 +334,44 @@ def main():
             generate_response(model, prj, tokenizer, bot_id, eot_id, user_input,
                               no_reasoning=args.no_reasoning)
             console.print()
+
+            # Oracle explanation
+            if oracle_model and not args.no_reasoning:
+                with console.status("[bold rgb(150,30,150)]Oracle analyzing...", spinner="dots"):
+                    trace = generate_with_traces(
+                        model, prj, tokenizer, bot_id, eot_id, user_input,
+                        collect_no_reasoning=False,
+                    )
+                    steps_data = [{
+                        "step": s.step,
+                        "top_k_tokens": s.top_k_tokens,
+                        "top_k_probs": s.top_k_probs,
+                        "entropy": s.entropy,
+                        "norm": s.norm,
+                        "sparsity": s.sparsity,
+                        "cosine_to_prev": s.cosine_to_prev,
+                    } for s in trace.steps]
+
+                    oracle_queries = [
+                        "Summarize what the latent reasoning is doing for this input.",
+                        "Which latent step is most critical for the final output?",
+                    ]
+                    explanations = []
+                    for q in oracle_queries:
+                        oi = make_oracle_input(user_input, steps_data, trace.output, q)
+                        ans = oracle_answer(oracle_model, oracle_tok, oi)
+                        explanations.append((q, ans))
+
+                oracle_body = "\n".join(
+                    f"[bold]{q}[/]\n{a}\n" for q, a in explanations
+                )
+                console.print(Panel(
+                    oracle_body,
+                    title="[bold rgb(150,30,150)]🔮 Latent Oracle[/]",
+                    border_style="rgb(150,30,150)",
+                    box=box.ROUNDED,
+                    width=80,
+                ))
         except KeyboardInterrupt:
             console.print("\nGoodbye!")
             break

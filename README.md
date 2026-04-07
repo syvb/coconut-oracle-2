@@ -63,7 +63,73 @@ Reasoning advantage: **+8.0%** (helped 134 questions, hurt 29).
 
 The `--no-reasoning` flag skips step 2, going straight from encoding to decoding.
 
+## Latent Oracle: Interpreting CoDI's Reasoning Tokens
+
+Inspired by [Activation Oracles](https://arxiv.org/abs/2512.15674), we train a small LM (SmolLM-360M) to answer natural language questions about what CoDI's latent reasoning tokens are doing. All training data is generated via **task-agnostic unsupervised methods** — no knowledge of the downstream task (GSM8K math) is assumed.
+
+### Training Data Generation (5 strategies, all task-agnostic)
+
+| Strategy | Method | Yield |
+|----------|--------|-------|
+| **Perturbation/Ablation** | Zero out or skip individual latent steps, observe output changes | 11,148 |
+| **Early Decoding** | Fork KV cache after each step, decode partial answer — reveals what model "knows" at each point | 11,871 |
+| **Contrastive** | Compare reasoning-on (6 steps) vs reasoning-off (0 steps) outputs | 1,866 |
+| **Token Prediction Stats** | Project hidden states to vocab space via `lm_head`; extract entropy, top-k tokens, convergence | 26,380 |
+| **Summary** | Composite questions combining signals from all strategies | 1,319 |
+| **Total** | | **52,584** |
+
+### Oracle Training
+
+- **Base model**: [SmolLM-360M-Instruct](https://huggingface.co/HuggingFaceTB/SmolLM-360M-Instruct)
+- **Fine-tuning**: LoRA (r=32, alpha=64) on all attention + MLP modules
+- **Data**: 47,326 train / 5,258 val QA pairs
+- **Input format**: Structured text encoding the question, per-step top-k tokens/probs/entropy, and model output
+
+| Epoch | Train Loss | Val Loss |
+|-------|-----------|----------|
+| 1 | 0.1146 | 0.0488 |
+| 2 | 0.0432 | 0.0352 |
+| 3 | 0.0283 | 0.0307 |
+
+### Oracle Evaluation (100 held-out questions)
+
+| Metric | Accuracy | What it measures |
+|--------|----------|-----------------|
+| Ablation prediction | **76%** | Can oracle identify which step is most critical? |
+| Convergence prediction | **72%** | Can oracle predict when output stabilizes? (±1 step) |
+| Contrastive | **73%** | Can oracle predict whether reasoning changes output? |
+| Redundancy consistency | **88%** | Do oracle's redundancy claims match actual ablation data? |
+
+### Oracle Scripts
+
+```bash
+# 1. Collect traces (latent states + ablations + early decodes)
+python collect_traces.py -n 1319 --output traces_test.jsonl
+
+# 2. Generate task-agnostic QA training data
+python generate_oracle_data.py --input traces_test.jsonl
+
+# 3. Train oracle (SmolLM-360M + LoRA)
+python train_oracle.py --train oracle_data.jsonl --val oracle_val.jsonl
+
+# 4. Evaluate
+python eval_oracle.py --traces traces_test.jsonl --oracle-dir oracle_model/best
+
+# 5. Interactive: ask questions about CoDI's reasoning
+python oracle_inference.py --prompt "Janet has 16 ducks..."
+
+# 6. Integrated chat with oracle explanations
+python chat_codi.py --oracle
+```
+
+### Key Findings
+
+- **Early decoding is the most revealing strategy**: partial answers show progressive refinement (e.g., pre-reasoning outputs "36", after step 2 corrects to "18")
+- **CoDI is robust to individual step ablation**: for many questions, zeroing a single step doesn't change the output, suggesting distributed/redundant representations
+- **The oracle achieves 88% consistency on redundancy claims** against ground-truth ablation data, demonstrating that the text-based trace representation (top-k tokens + entropy) captures meaningful information about latent reasoning
+
 ## Reference
 
 - [CoDi paper](https://arxiv.org/abs/2502.21074) (EMNLP 2025)
+- [Activation Oracles paper](https://arxiv.org/abs/2512.15674)
 - [Official CoDi repo](https://github.com/zhenyi4/codi) (cloned at `/workspace/codi`)
