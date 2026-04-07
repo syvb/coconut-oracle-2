@@ -167,6 +167,32 @@ def extract_number(text):
     return float(nums[-1])
 
 
+@torch.no_grad()
+def generate_raw(model, tokenizer, prompt, max_new_tokens=256):
+    """Use CoDI's underlying LLaMA for plain text completion (no latent reasoning).
+
+    This bypasses the CoDI inference pipeline entirely -- just standard
+    autoregressive generation from the merged LLaMA weights.
+    """
+    ori_vocab = model.config.vocab_size - 3
+    inputs = tokenizer(prompt, return_tensors="pt").to(device)
+    generated = []
+    past_kv = None
+    input_ids = inputs["input_ids"]
+
+    for i in range(max_new_tokens):
+        out = model(input_ids=input_ids, use_cache=True, past_key_values=past_kv)
+        past_kv = out.past_key_values
+        logits = out.logits[:, -1, :ori_vocab]
+        tok_id = torch.argmax(logits, dim=-1).item()
+        if tok_id == tokenizer.eos_token_id or tok_id >= ori_vocab:
+            break
+        generated.append(tok_id)
+        input_ids = torch.tensor([[tok_id]], dtype=torch.long, device=device)
+
+    return tokenizer.decode(generated, skip_special_tokens=True)
+
+
 # ── Trace / ablation / early-decode infrastructure ───────────────────────────
 
 @dataclass

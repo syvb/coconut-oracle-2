@@ -19,7 +19,7 @@ from rich.align import Align
 from rich.console import Group
 from rich import box
 
-from codi_model import load_model, generate_with_traces, NUM_LATENT, device
+from codi_model import load_model, generate_with_traces, generate_raw, NUM_LATENT, device
 
 console = Console()
 
@@ -297,6 +297,8 @@ def main():
                         help="Path to oracle adapter weights")
     parser.add_argument("--oracle-base", default=None,
                         help="Base model for oracle")
+    parser.add_argument("--compare-codi", action="store_true",
+                        help="Also show CoDI's own LLaMA answering the same oracle prompt (baseline comparison)")
     args = parser.parse_args()
 
     console.print(Panel(
@@ -314,12 +316,14 @@ def main():
 
     oracle_model = None
     oracle_tok = None
-    if args.oracle:
-        with console.status("[bold rgb(150,30,150)]Loading oracle...", spinner="dots"):
-            from oracle_inference import load_oracle, oracle_answer
-            from generate_oracle_data import make_oracle_input
+    if args.oracle or args.compare_codi:
+        from oracle_inference import load_oracle, oracle_answer
+        from generate_oracle_data import make_oracle_input
+        with console.status("[bold rgb(150,30,150)]Loading trained oracle...", spinner="dots"):
             oracle_model, oracle_tok = load_oracle(args.oracle_dir, args.oracle_base)
-        console.print("[bold rgb(150,30,150)]Oracle loaded.[/]")
+        console.print("[bold rgb(150,30,150)]Trained oracle loaded.[/]")
+        if args.compare_codi:
+            console.print("[bold rgb(100,100,100)]--compare-codi: will also show CoDI LLaMA baseline answers[/]")
 
     console.print("[bold rgb(0,130,50)]Ready![/] Type a math question. (quit to exit)\n")
 
@@ -357,21 +361,37 @@ def main():
                         "Which latent step is most critical for the final output?",
                     ]
                     explanations = []
+                    codi_explanations = []
                     for q in oracle_queries:
                         oi = make_oracle_input(user_input, steps_data, trace.output, q)
                         ans = oracle_answer(oracle_model, oracle_tok, oi)
                         explanations.append((q, ans))
+                        if args.compare_codi:
+                            codi_ans = generate_raw(model, tokenizer, oi, max_new_tokens=256)
+                            codi_explanations.append((q, codi_ans))
 
                 oracle_body = "\n".join(
                     f"[bold]{q}[/]\n{a}\n" for q, a in explanations
                 )
                 console.print(Panel(
                     oracle_body,
-                    title="[bold rgb(150,30,150)]🔮 Latent Oracle[/]",
+                    title="[bold rgb(150,30,150)]🔮 Trained Oracle[/]",
                     border_style="rgb(150,30,150)",
                     box=box.ROUNDED,
                     width=80,
                 ))
+
+                if args.compare_codi and codi_explanations:
+                    codi_body = "\n".join(
+                        f"[bold]{q}[/]\n{a}\n" for q, a in codi_explanations
+                    )
+                    console.print(Panel(
+                        codi_body,
+                        title="[bold rgb(100,100,100)]CoDI LLaMA (no oracle training)[/]",
+                        border_style="rgb(100,100,100)",
+                        box=box.ROUNDED,
+                        width=80,
+                    ))
 
                 # Interactive oracle Q&A loop
                 while True:
@@ -379,16 +399,28 @@ def main():
                     oracle_q = console.input("[bold rgb(150,30,150)]Oracle Q:[/] ").strip()
                     if not oracle_q:
                         break
+                    oi = make_oracle_input(user_input, steps_data, trace.output, oracle_q)
+
                     with console.status("[bold rgb(150,30,150)]Oracle thinking...", spinner="dots"):
-                        oi = make_oracle_input(user_input, steps_data, trace.output, oracle_q)
                         ans = oracle_answer(oracle_model, oracle_tok, oi)
                     console.print(Panel(
                         ans,
-                        title=f"[bold rgb(150,30,150)]🔮 {oracle_q}[/]",
+                        title=f"[bold rgb(150,30,150)]🔮 Trained Oracle[/]",
                         border_style="rgb(150,30,150)",
                         box=box.ROUNDED,
                         width=80,
                     ))
+
+                    if args.compare_codi:
+                        with console.status("[bold rgb(100,100,100)]CoDI LLaMA thinking...", spinner="dots"):
+                            codi_ans = generate_raw(model, tokenizer, oi, max_new_tokens=256)
+                        console.print(Panel(
+                            codi_ans,
+                            title=f"[bold rgb(100,100,100)]CoDI LLaMA (no oracle training)[/]",
+                            border_style="rgb(100,100,100)",
+                            box=box.ROUNDED,
+                            width=80,
+                        ))
         except KeyboardInterrupt:
             console.print("\nGoodbye!")
             break
