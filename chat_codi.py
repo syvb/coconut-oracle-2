@@ -299,7 +299,13 @@ def main():
                         help="Base model for oracle")
     parser.add_argument("--compare-codi", action="store_true",
                         help="Also show CoDI's own LLaMA answering the same oracle prompt (baseline comparison)")
+    parser.add_argument("--no-token-info", action="store_true",
+                        help="Strip token info from oracle trace inputs (must match training)")
     args = parser.parse_args()
+
+    if args.no_token_info:
+        import generate_oracle_data
+        generate_oracle_data._no_token_info = True
 
     console.print(Panel(
         BANNER_BODY,

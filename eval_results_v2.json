@@ -1,0 +1,22 @@
+{
+  "ablation": {
+    "correct": 76,
+    "total": 100,
+    "accuracy": 76.0
+  },
+  "convergence": {
+    "correct": 74,
+    "total": 100,
+    "accuracy": 74.0
+  },
+  "contrastive": {
+    "correct": 68,
+    "total": 100,
+    "accuracy": 68.0
+  },
+  "redundancy": {
+    "consistent": 88,
+    "total": 100,
+    "accuracy": 88.0
+  }
+}

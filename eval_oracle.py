@@ -191,7 +191,14 @@ def main():
     parser.add_argument("--num", type=int, default=None,
                         help="Max records to evaluate (default: all)")
     parser.add_argument("--output", default=None, help="Save results JSON")
+    parser.add_argument("--no-token-info", action="store_true",
+                        help="Strip token info from trace inputs (must match training)")
     args = parser.parse_args()
+
+    if args.no_token_info:
+        import generate_oracle_data
+        generate_oracle_data._no_token_info = True
+        print("Token info stripped from trace inputs (--no-token-info)")
 
     # Load oracle
     oracle_model, oracle_tok = load_oracle(args.oracle_dir, args.oracle_base)

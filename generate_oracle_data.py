@@ -25,26 +25,52 @@ from pathlib import Path
 from codi_model import extract_number, NUM_LATENT
 
 
-def format_latent_trace(steps):
-    """Format latent step data as structured text for the oracle input."""
+def format_latent_trace(steps, no_token_info=False):
+    """Format latent step data as structured text for the oracle input.
+
+    If no_token_info=True, omit all decoded token predictions and probabilities.
+    Only include structural statistics (entropy, norm, sparsity, cosine).
+    """
     lines = []
     for s in steps:
-        tokens_str = ", ".join(repr(t) for t in s["top_k_tokens"][:5])
-        probs_str = ", ".join(f"{p:.3f}" for p in s["top_k_probs"][:5])
         cos_str = f"  cos_prev={s['cosine_to_prev']:.4f}" if s["cosine_to_prev"] is not None else ""
-        lines.append(
-            f"Step {s['step']}: top=[{tokens_str}] probs=[{probs_str}] "
-            f"entropy={s['entropy']:.2f} norm={s['norm']:.1f} "
-            f"sparsity={s['sparsity']:.1%}{cos_str}"
-        )
+        if no_token_info:
+            lines.append(
+                f"Step {s['step']}: "
+                f"entropy={s['entropy']:.2f} norm={s['norm']:.1f} "
+                f"sparsity={s['sparsity']:.1%}{cos_str}"
+            )
+        else:
+            tokens_str = ", ".join(repr(t) for t in s["top_k_tokens"][:5])
+            probs_str = ", ".join(f"{p:.3f}" for p in s["top_k_probs"][:5])
+            lines.append(
+                f"Step {s['step']}: top=[{tokens_str}] probs=[{probs_str}] "
+                f"entropy={s['entropy']:.2f} norm={s['norm']:.1f} "
+                f"sparsity={s['sparsity']:.1%}{cos_str}"
+            )
     return "\n".join(lines)
+
+
+# Module-level flag, set by main() based on CLI args
+_no_token_info = False
 
 
 def make_oracle_input(question, steps, output, query):
     """Build the full oracle input prompt."""
-    trace_text = format_latent_trace(steps)
+    trace_text = format_latent_trace(steps, no_token_info=_no_token_info)
     return (
         f"<input>{question}</input>\n"
+        f"<latent_trace>\n{trace_text}\n</latent_trace>\n"
+        f"<model_output>{output}</model_output>\n"
+        f"<query>{query}</query>\n"
+        f"<response>"
+    )
+
+
+def make_oracle_input_no_question(steps, output, query):
+    """Build oracle input with the question hidden (for prompt reconstruction)."""
+    trace_text = format_latent_trace(steps, no_token_info=_no_token_info)
+    return (
         f"<latent_trace>\n{trace_text}\n</latent_trace>\n"
         f"<model_output>{output}</model_output>\n"
         f"<query>{query}</query>\n"
@@ -503,7 +529,70 @@ def generate_summary_qa(record):
     return pairs
 
 
+# ── Strategy 7: Prompt Reconstruction ────────────────────────────────────────
+
+def generate_prompt_reconstruction_qa(record):
+    """Generate QA asking the oracle to reconstruct the input prompt.
+
+    The question is hidden from the oracle input -- only the latent trace
+    and model output are provided. The oracle must infer what was asked.
+    """
+    pairs = []
+    question = record["question"]
+    steps = record["steps"]
+    output = record["output"]
+
+    # Full reconstruction
+    pairs.append({
+        "input": make_oracle_input_no_question(
+            steps, output,
+            "What question was the model asked?"
+        ),
+        "response": question,
+        "strategy": "prompt_reconstruction",
+        "sub_type": "full",
+    })
+
+    # Shorter: what is the topic/domain?
+    # Truncate to first sentence as a simpler target
+    first_sentence = question.split(".")[0] + "." if "." in question else question
+    pairs.append({
+        "input": make_oracle_input_no_question(
+            steps, output,
+            "Briefly describe what the input question is about."
+        ),
+        "response": first_sentence,
+        "strategy": "prompt_reconstruction",
+        "sub_type": "topic",
+    })
+
+    # What kind of answer does the question expect?
+    pairs.append({
+        "input": make_oracle_input_no_question(
+            steps, output,
+            "What kind of answer does the input question expect?"
+        ),
+        "response": f"The model produced: {repr(output.strip())}.",
+        "strategy": "prompt_reconstruction",
+        "sub_type": "answer_type",
+    })
+
+    return pairs
+
+
 # ── Main ─────────────────────────────────────────────────────────────────────
+
+STRATEGY_MAP = {
+    "ablation": generate_ablation_qa,
+    "early_decode": generate_early_decode_qa,
+    "contrastive": generate_contrastive_qa,
+    "token_stats": generate_token_stats_qa,
+    "summary": generate_summary_qa,
+    "prompt_reconstruction": generate_prompt_reconstruction_qa,
+}
+
+ALL_STRATEGIES = list(STRATEGY_MAP.keys())
+
 
 def main():
     parser = argparse.ArgumentParser(description="Generate oracle training data")
@@ -514,10 +603,23 @@ def main():
                         help="Validation output (default: oracle_val.jsonl)")
     parser.add_argument("--val-fraction", type=float, default=0.1)
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--strategies", nargs="+", default=None,
+                        choices=ALL_STRATEGIES,
+                        help=f"Which strategies to use (default: all). Choices: {ALL_STRATEGIES}")
+    parser.add_argument("--no-token-info", action="store_true",
+                        help="Strip decoded token predictions from trace inputs "
+                             "(only keep entropy, norm, sparsity, cosine)")
     args = parser.parse_args()
+
+    global _no_token_info
+    _no_token_info = args.no_token_info
 
     output_path = Path(args.output or "oracle_data.jsonl")
     val_path = Path(args.val_output or "oracle_val.jsonl")
+
+    selected = args.strategies or ALL_STRATEGIES
+    if args.no_token_info:
+        print("Token info stripped from trace inputs (--no-token-info)")
 
     random.seed(args.seed)
 
@@ -528,20 +630,15 @@ def main():
         for line in f:
             records.append(json.loads(line))
     print(f"Loaded {len(records)} trace records")
+    print(f"Strategies: {selected}")
 
     # Generate QA pairs
     all_pairs = []
     strategy_counts = {}
 
     for record in records:
-        generators = [
-            generate_ablation_qa,
-            generate_early_decode_qa,
-            generate_contrastive_qa,
-            generate_token_stats_qa,
-            generate_summary_qa,
-        ]
-        for gen_fn in generators:
+        for strat_name in selected:
+            gen_fn = STRATEGY_MAP[strat_name]
             pairs = gen_fn(record)
             for p in pairs:
                 p["source_index"] = record["index"]

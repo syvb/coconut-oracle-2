@@ -8,3 +8,6 @@ oracle_train.jsonl
 oracle_val.jsonl
 *.cache.pt
 oracle_model/
+oracle_model_v2/
+oracle_train_v2.jsonl
+oracle_val_v2.jsonl
